@@ -1,5 +1,3 @@
-# app/streamlit_app.py
-
 """
 极简版前端（严格基于 quick_start.py 的现有接口）：
 
@@ -12,15 +10,21 @@
            DefaultRunner + RagBatchRunner
            RagasEvaluator
        - 前端展示 overall 指标和逐样本评分表。
-  3. 单次查看模式：
+       - 将后台批量 Evaluating 进度通过回调同步到 Streamlit 进度条。
+  3. 单条查看模式：
        - 在已经评估完成的前提下，从逐样本结果中选一条，
          展示该样本的 question / answer / contexts / 各项指标。
+  4. 在线 RAG 问答模式：
+       - 复用 DefaultRunner，输入任意问题直接走一条 RAG 链路，
+         展示生成答案和检索上下文。
 """
 
 from typing import List, Any, Dict
 
 import streamlit as st
 import pandas as pd
+import time
+
 
 import sys
 from pathlib import Path
@@ -40,24 +44,20 @@ from qwen_rag_eval.evaluation import (
 
 
 # ============================================================
-# 复用 quick_start.py 的批量评估逻辑
+# 复用 quick_start.py 的批量评估逻辑（增加进度回调）
 # ============================================================
+
+# app/streamlit_app.py 中，替换原来的 run_batch_evaluation 定义
 
 def run_batch_evaluation(
     config_path: str,
     eval_limit: int,
 ) -> Any:
     """
-    完全等价于 quick_start.py 的 main 流程，只去掉打印。
+    使用 quick_start.py 的同一条链路，增加前端展示：
 
-    步骤：
-      1. 构建 CMRC2018 数据与向量库
-      2. 加载评估样本（前 eval_limit 条）
-      3. DefaultRunner + RagBatchRunner 跑 RAG
-      4. RagasEvaluator 做评估
-
-    返回值：
-      EvalResult（新实现）或 dict（兼容旧实现）
+      1. 前半段：批量生成答案（带真实进度条）
+      2. 后半段：RAGAS 评分（转圈圈 + 提示大约耗时为生成答案的四倍）
     """
     # 1. 构建数据与向量库（如果已经存在会直接跳过或增量）
     build_cmrc_dataset_and_vector_store(config_path)
@@ -65,16 +65,64 @@ def run_batch_evaluation(
     # 2. 加载评估样本
     samples: List[dict] = load_cmrc_samples(config_path)
     eval_samples = samples[:eval_limit]
+    total = len(eval_samples)
 
-    # 3. 批量跑 RAG
+    # 3. 批量生成答案：DefaultRunner + RagBatchRunner
     runner = DefaultRunner(config_path=config_path)
     batch = RagBatchRunner(runner, mode="default")
-    records = batch.run_batch(eval_samples, show_progress=True)
 
-    # 4. 调用 RAGAS 评估
+    # 进度条：明确说明是“生成答案”
+    rag_progress = st.progress(0, text="正在批量生成答案…")
+    rag_status = st.empty()
+
+    def rag_progress_callback(current: int, total_: int):
+        ratio = current / max(total_, 1)
+        rag_progress.progress(
+            ratio,
+            text=f"正在批量生成答案：{current}/{total_} ({ratio:.0%})"
+        )
+        rag_status.text(f"批量生成答案进度：{current}/{total_}")
+
+    rag_start = time.perf_counter()
+    records = batch.run_batch(
+        eval_samples,
+        show_progress=False,              # 关闭后端 tqdm，只用前端进度条
+        progress_callback=rag_progress_callback,
+    )
+    rag_end = time.perf_counter()
+    rag_duration = rag_end - rag_start
+
+    rag_progress.progress(1.0, text="批量生成答案完成")
+    rag_status.text(
+        f"批量生成答案完成，共 {total} 条，实际耗时 {rag_duration:.1f} 秒"
+    )
+
+    # 4. RAGAS 评分阶段：只用转圈提示“正在评分中，大约是生成答案时间的四倍”
+    #    做一个简单的时间估计，不参与任何真实逻辑
+    estimated_eval_seconds = rag_duration * 4.0
+    # 给一个合理的上下限，避免极端值
+    estimated_eval_seconds = max(5.0, estimated_eval_seconds)
+
     evaluator = RagasEvaluator(config_path=config_path)
-    result = evaluator.evaluate(records)
+
+    msg = (
+        f"正在进行 RAGAS 评分，大约需要 {estimated_eval_seconds:.0f} 秒"
+        "（约为批量生成答案耗时的四倍）…"
+    )
+
+    eval_start = time.perf_counter()
+    with st.spinner(msg):
+        # 这里内部会打印它自己的 Casting / Evaluating tqdm 到终端，
+        # 前端只看到这个“转圈圈”提示。
+        result = evaluator.evaluate(records)
+    eval_end = time.perf_counter()
+    eval_duration = eval_end - eval_start
+
+    st.info(f"评分完成，实际评分耗时约 {eval_duration:.1f} 秒")
+
     return result
+
+
 
 
 # ============================================================
@@ -106,17 +154,17 @@ def main():
         step=1,
     )
 
-    if st.sidebar.button("构建 / 刷新 CMRC 向量库"):
-        with st.spinner("正在构建 CMRC 数据集与向量库…"):
+    if st.sidebar.button("构建 / 刷新向量库"):
+        with st.spinner("正在构建数据集与向量库…"):
             build_cmrc_dataset_and_vector_store(config_path)
         st.sidebar.success("向量库构建 / 刷新完成")
 
     mode = st.sidebar.radio(
         "模式选择",
-        ("批量评估", "单条查看"),
+        ("批量评估", "单条查看", "在线 RAG 问答"),
     )
 
-    # 用于跨模式共享评估结果
+    # 用于跨模式共享评估结果和 runner
     if "eval_result" not in st.session_state:
         st.session_state["eval_result"] = None
     if "eval_per_sample" not in st.session_state:
@@ -125,6 +173,8 @@ def main():
         st.session_state["eval_overall"] = None
     if "eval_csv_path" not in st.session_state:
         st.session_state["eval_csv_path"] = None
+    if "online_runner" not in st.session_state:
+        st.session_state["online_runner"] = None
 
     # ========================================================
     # 模式一：批量评估（主入口）
@@ -204,9 +254,9 @@ def main():
             st.info(f"逐样本结果已写入 CSV：{csv_path}")
 
     # ========================================================
-    # 模式二：单条查看（在已有评估结果上查看每条的评分）
+    # 模式二：单条查看
     # ========================================================
-    else:
+    elif mode == "单条查看":
         st.subheader("单条样本详情查看")
 
         per_sample = st.session_state.get("eval_per_sample")
@@ -264,6 +314,52 @@ def main():
         if metric_cols:
             st.markdown("**该样本的各项指标**")
             st.write(row[metric_cols].to_dict())
+
+    # ========================================================
+    # 模式三：在线 RAG 问答
+    # ========================================================
+    else:
+        st.subheader("在线 RAG 问答")
+
+        # 懒加载一个 DefaultRunner，避免每次重建
+        if st.session_state["online_runner"] is None:
+            st.session_state["online_runner"] = DefaultRunner(
+                config_path=config_path
+            )
+
+        runner: DefaultRunner = st.session_state["online_runner"]
+
+        # 简单单轮问答窗口（保持和 DefaultRunner.run(question) 接口一致）
+        question = st.text_area(
+            "输入你的问题（将通过当前配置的 RAG 链路检索与生成）：",
+            height=100,
+            placeholder="例如：CMRC2018 数据集主要解决什么任务？",
+        )
+
+        if st.button("发送"):
+            if not question.strip():
+                st.warning("问题内容不能为空。")
+                return
+
+            with st.spinner("正在通过 RAG 链路生成答案…"):
+                # 这里假定 DefaultRunner 暴露了 run(question: str) 接口
+                out: Dict[str, Any] = runner.run(question)
+
+            answer = out.get("answer") or out.get("generation", "")
+            contexts = out.get("contexts", [])
+
+            st.markdown("**Answer**")
+            st.write(answer)
+
+            if contexts:
+                st.markdown("**检索到的上下文（前若干条）**")
+                # 简单展开前 3 条
+                for i, ctx in enumerate(contexts[:3]):
+                    st.markdown(f"Context {i + 1}")
+                    if isinstance(ctx, dict):
+                        st.write(ctx)
+                    else:
+                        st.write(str(ctx))
 
 
 if __name__ == "__main__":

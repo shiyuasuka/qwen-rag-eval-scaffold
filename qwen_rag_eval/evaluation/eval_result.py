@@ -118,9 +118,20 @@ class EvalResult:
         print(f"=== Per-sample Metrics (top {top_n}) ===")
         print(self.per_sample.head(top_n))
 
-    def show_streamlit(self) -> None:
+    def show_streamlit(
+        self,
+        top_n: int = 5,
+        show_bar: bool = True,
+    ) -> None:
         """
         使用 Streamlit 展示评估结果。
+
+        参数：
+          top_n:
+            展示前多少条样本的明细。
+          show_bar:
+            是否对 overall 数值指标绘制柱状图。
+
         需要预先安装 streamlit：pip install streamlit
         """
         try:
@@ -131,7 +142,26 @@ class EvalResult:
             )
 
         st.subheader("RAGAS Overall Metrics")
-        st.json(self.overall)
 
-        st.subheader("Per-sample Metrics")
-        st.dataframe(self.per_sample)
+        # 只保留数值型指标，便于绘制柱状图
+        numeric_overall: Dict[str, float] = {}
+        for k, v in self.overall.items():
+            if isinstance(v, (int, float)):
+                numeric_overall[k] = float(v)
+
+        # 原始 overall 字典完整展示一份
+        st.write(self.overall)
+
+        # 可选柱状图视图
+        if show_bar and numeric_overall:
+            df_overall = pd.DataFrame.from_dict(
+                numeric_overall, orient="index", columns=["score"]
+            )
+            df_overall.index.name = "metric"
+            st.bar_chart(df_overall)
+
+        st.subheader(f"Per-sample Metrics (top {top_n})")
+        st.dataframe(self.per_sample.head(top_n))
+
+        if self.csv_path:
+            st.info(f"逐样本结果已写入 CSV：{self.csv_path}")

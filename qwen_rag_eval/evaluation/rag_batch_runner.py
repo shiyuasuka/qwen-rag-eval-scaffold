@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable, Callable
 
 from tqdm import tqdm
 
@@ -44,6 +44,10 @@ class RagEvalRecord:
     contexts: List[str]
     ground_truth: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
+
+
+# 进度回调类型：current, total
+ProgressCallback = Callable[[int, int], None]
 
 
 class RagBatchRunner:
@@ -117,6 +121,7 @@ class RagBatchRunner:
         eval_samples: List[Dict[str, Any]],
         limit: Optional[int] = None,
         show_progress: bool = True,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> List[RagEvalRecord]:
         """
         批量执行 RAG。
@@ -135,7 +140,11 @@ class RagBatchRunner:
             若设置，只处理前 limit 条样本。
 
           show_progress:
-            是否使用 tqdm 显示进度条。
+            是否使用 tqdm 显示进度条（仅在 progress_callback 为空时生效）。
+
+          progress_callback:
+            若提供，则每处理一条样本调用一次 progress_callback(current, total)，
+            方便在外部（如 Streamlit）更新进度条。
 
         返回：
           RagEvalRecord 列表，可直接传给 RAGAS 评估模块。
@@ -147,13 +156,14 @@ class RagBatchRunner:
         if limit is not None:
             samples = samples[:limit]
 
+        total = len(samples)
         records: List[RagEvalRecord] = []
 
         iterator = enumerate(samples)
-        if show_progress:
+        if show_progress and progress_callback is None:
             iterator = tqdm(
                 iterator,
-                total=len(samples),
+                total=total,
                 desc=f"RAG [{self.mode}] Running",
                 ncols=90,
             )
@@ -210,5 +220,10 @@ class RagBatchRunner:
                 meta=meta,
             )
             records.append(record)
+
+            # 6. 进度回调（current 用 1 开始更直观）
+            if progress_callback is not None:
+                current = idx + 1
+                progress_callback(current, total)
 
         return records
