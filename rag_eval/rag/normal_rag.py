@@ -93,36 +93,23 @@ class NormalRag:
 
     def invoke(self, question: str) -> Dict[str, Any]:
         """
-        执行一次 RAG：
-
-          返回结构：
-            {
-              "question": 原始问题,
-              "answer":   模型回答文本,
-              "contexts": [
-                {"content": 文本, "metadata": {...}},
-                ...
-              ]
-            }
+        执行一次 RAG
         """
-        # 1）检索上下文
-        docs: List[Document] = self.retriever.get_relevant_documents(question)
+        # 1）检索上下文（新版接口）
+        docs: List[Document] = self.retriever.invoke(question)
 
         contexts_text = "\n\n".join(d.page_content for d in docs)
-        memory_text = ""  # 预留给后续负记忆模块
+        memory_text = ""
 
-        # 2）组装提示词输入（固定三个变量，和 YAML 模板保持一致）
         messages = self.prompt.format_messages(
             question=question,
             contexts=contexts_text,
             memory_text=memory_text,
         )
 
-        # 3）调用模型并解析为字符串
         llm_output = self.llm.invoke(messages)
         answer_text = getattr(llm_output, "content", str(llm_output))
 
-        # 4）整理返回结构
         contexts = [
             {
                 "content": d.page_content,
