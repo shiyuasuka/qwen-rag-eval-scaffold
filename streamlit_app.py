@@ -328,4 +328,6 @@ def main() -> None:
                     st.markdown(f"Context {i + 1}")
                     st.write(str(ctx))
 
+if __name__ == "__main__":
+    main()
 
