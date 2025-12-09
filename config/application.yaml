@@ -54,7 +54,7 @@ dataset:
 
     # 每个 split 内部的样本数上限
     # 先对单个 split 截断，控制单个文件的样本量
-    sample_limit_per_split: 10
+    sample_limit_per_split: 20
 
     # 所有 split 合并之后的总体样本数上限
     # 合并后再截一次，控制总的 samples 数量
